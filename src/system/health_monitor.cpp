@@ -28,15 +28,25 @@ SystemHealth HealthMonitor::getSystemHealth() {
     health.heapSize = ESP.getHeapSize();
     health.cpuFreq = ESP.getCpuFreqMHz();
 
-    // Network metrics (would be populated by mesh manager)
-    // TODO: Integrate with actual mesh manager to get real metrics
-    health.meshConnections = 0; // Placeholder - implement mesh manager integration
-    health.networkHealth = 0.0; // Placeholder - calculate based on connection stability
+    // Network metrics - integrate with mesh manager
+    extern MeshNetworkManager* meshManager; // Forward declaration
+    if (meshManager) {
+        health.meshConnections = meshManager->getNodeCount();
+        health.networkHealth = meshManager->isNetworkConnected() ? 1.0 : 0.0;
+    } else {
+        health.meshConnections = 0;
+        health.networkHealth = 0.0;
+    }
 
-    // SIM metrics (would be populated by SIM manager)
-    // TODO: Integrate with actual SIM manager to get real metrics
-    health.activeSims = 0; // Placeholder - implement SIM manager integration
-    health.simHealth = 0.0; // Placeholder - calculate based on SIM status and signal
+    // SIM metrics - integrate with SIM manager
+    extern SIMMultiplexer* simManager; // Forward declaration
+    if (simManager) {
+        health.activeSims = simManager->getActiveSIMCount();
+        health.simHealth = simManager->getAverageSignalStrength() / 31.0; // Normalize 0-31 to 0.0-1.0
+    } else {
+        health.activeSims = 0;
+        health.simHealth = 0.0;
+    }
 
     // Power metrics
     health.voltage = readVoltage();

@@ -88,36 +88,43 @@ String PersianSMSHandler::preparePDUMessage(const String& message, const String&
     // Convert UTF-8 message to UCS2
     String ucs2Message = utf8ToUCS2(message);
 
-    // Create PDU format for SMS
-    // This is a simplified implementation - real PDU encoding is more complex
-    String pdu = "00"; // SMSC length (0 = use default)
+    // Create complete PDU format for SMS submission
+    String pdu = "";
 
-    // Message flags (UCS2 encoding)
-    pdu += "11"; // First octet: Reply path, User data header, Status report, Validity period
-
-    // Message reference
+    // SMSC address (empty for default)
     pdu += "00";
 
-    // Recipient phone number
+    // PDU type: SMS-SUBMIT, no reply path, no status report, no validity period
+    pdu += "01";
+
+    // Message reference (let network assign)
+    pdu += "00";
+
+    // Destination address (recipient)
     String phoneNumber = formatPhoneNumber(recipient);
-    pdu += String(phoneNumber.length() / 2 + 1, HEX); // Length of phone number
-    pdu += "91"; // International format
+    int addressLength = phoneNumber.length() / 2;
+    char addrLenHex[3];
+    sprintf(addrLenHex, "%02X", addressLength);
+    pdu += addrLenHex;
+    pdu += "91"; // Type-of-address: international
     pdu += phoneNumber;
 
-    // Protocol identifier
+    // Protocol identifier: default
     pdu += "00";
 
-    // Data coding scheme (UCS2)
+    // Data coding scheme: UCS2 (16-bit)
     pdu += "08";
 
-    // Validity period
+    // Validity period: default (maximum)
     pdu += "FF";
 
-    // User data length (in septets for 7-bit, but characters for UCS2)
-    int userDataLength = ucs2Message.length() / 2; // Each UCS2 char is 2 bytes
-    pdu += String(userDataLength, HEX);
+    // User data length (number of UCS2 characters)
+    int userDataLength = ucs2Message.length() / 2;
+    char udLenHex[3];
+    sprintf(udLenHex, "%02X", userDataLength);
+    pdu += udLenHex;
 
-    // User data (UCS2 encoded message)
+    // User data: UCS2 encoded message
     for (size_t i = 0; i < ucs2Message.length(); i++) {
         char hex[3];
         sprintf(hex, "%02X", (uint8_t)ucs2Message.charAt(i));
@@ -156,21 +163,48 @@ std::vector<String> PersianSMSHandler::splitLongMessage(const String& message, s
     std::vector<String> parts;
 
     // For Persian text, we need to be careful about character boundaries
+    // SMS max length for UCS2 is 70 characters (140 bytes)
     size_t currentPos = 0;
+    size_t effectiveMaxLength = maxLength > 70 ? 70 : maxLength;
 
     while (currentPos < message.length()) {
-        size_t chunkSize = min(maxLength, message.length() - currentPos);
+        size_t chunkSize = effectiveMaxLength;
+        if (currentPos + chunkSize > message.length()) {
+            chunkSize = message.length() - currentPos;
+        }
 
-        // Try to break at word boundaries if possible
+        // For Persian text, try to break at word boundaries
+        // Look for Persian word separators: space, Persian comma, etc.
         if (currentPos + chunkSize < message.length()) {
             size_t lastSpace = message.lastIndexOf(' ', currentPos + chunkSize);
+            size_t lastComma = message.lastIndexOf('،', currentPos + chunkSize);
+            size_t lastPeriod = message.lastIndexOf('.', currentPos + chunkSize);
+
+            // Find the best break point
+            size_t breakPoint = currentPos + chunkSize;
             if (lastSpace > currentPos && lastSpace > currentPos + chunkSize / 2) {
-                chunkSize = lastSpace - currentPos;
+                breakPoint = lastSpace;
+            } else if (lastComma > currentPos && lastComma > currentPos + chunkSize / 2) {
+                breakPoint = lastComma;
+            } else if (lastPeriod > currentPos && lastPeriod > currentPos + chunkSize / 2) {
+                breakPoint = lastPeriod;
+            }
+
+            chunkSize = breakPoint - currentPos;
+
+            // Ensure we don't break in the middle of a multi-byte UTF-8 sequence
+            while (chunkSize > 0 && (uint8_t)message.charAt(currentPos + chunkSize - 1) >= 0x80) {
+                chunkSize--;
             }
         }
 
         parts.push_back(message.substring(currentPos, currentPos + chunkSize));
         currentPos += chunkSize;
+
+        // Skip any leading whitespace in next part
+        while (currentPos < message.length() && message.charAt(currentPos) == ' ') {
+            currentPos++;
+        }
     }
 
     return parts;
@@ -195,13 +229,47 @@ bool PersianSMSHandler::isPersianText(const String& text) {
 }
 
 String PersianSMSHandler::normalizePersianText(const String& text) {
-    // Basic normalization for Persian text
-    // This is a simplified implementation - real normalization would be more comprehensive
+    // Comprehensive Persian text normalization
     String normalized = text;
 
-    // Replace Arabic Yeh with Persian Yeh
-    normalized.replace("ي", "ی");
-    normalized.replace("ك", "ک");
+    // Replace Arabic characters with Persian equivalents
+    normalized.replace("ي", "ی");     // Arabic Yeh -> Persian Yeh
+    normalized.replace("ك", "ک");     // Arabic Kaf -> Persian Kaf
+    normalized.replace("ة", "ه");     // Arabic Teh Marbuta -> Persian Heh
+    normalized.replace("ۀ", "ه");     // Arabic Heh with Yeh -> Persian Heh
+    normalized.replace("ى", "ی");     // Arabic Alef Maksura -> Persian Yeh
+    normalized.replace("ؤ", "و");     // Arabic Waw with Hamza -> Persian Waw
+    normalized.replace("ئ", "ی");     // Arabic Yeh with Hamza -> Persian Yeh
+    normalized.replace("ء", "");      // Arabic Hamza -> remove
+    normalized.replace("آ", "ا");     // Arabic Alef with Madda -> Persian Alef
+    normalized.replace("إ", "ا");     // Arabic Alef with Hamza below -> Persian Alef
+    normalized.replace("أ", "ا");     // Arabic Alef with Hamza above -> Persian Alef
+    normalized.replace("ٱ", "ا");     // Arabic Alef Wasla -> Persian Alef
+    normalized.replace("اً", "ا");     // Arabic Alef with Tanwin -> Persian Alef
+
+    // Normalize Persian specific characters
+    normalized.replace("ﷲ", "الله"); // Allah ligature
+    normalized.replace("ﷳ", "اکبر"); // Akbar ligature
+    normalized.replace("ﷴ", "محمد"); // Muhammad ligature
+    normalized.replace("ﷵ", "صلعم"); // Peace be upon him
+    normalized.replace("ﷶ", "رسول"); // Rasul ligature
+    normalized.replace("ﷷ", "علیه"); // Alayhi ligature
+    normalized.replace("ﷸ", "وسلم"); // Peace be upon him
+    normalized.replace("ﷹ", "صلی"); // Salla ligature
+    normalized.replace("ﷺ", "صلی الله علیه وسلم"); // Complete peace be upon him
+    normalized.replace("ﷻ", "جل جلاله"); // Glory be to Him
+
+    // Handle Tatweel (elongation character) - remove excessive ones
+    while (normalized.indexOf("ــ") != -1) {
+        normalized.replace("ــ", "ـ");
+    }
+
+    // Normalize spacing around punctuation
+    normalized.replace("  ", " "); // Multiple spaces to single
+    normalized.replace(" ،", "،"); // Space before comma
+    normalized.replace(" .", "."); // Space before period
+    normalized.replace(" :", ":"); // Space before colon
+    normalized.replace(" ;", ";"); // Space before semicolon
 
     return normalized;
 }
